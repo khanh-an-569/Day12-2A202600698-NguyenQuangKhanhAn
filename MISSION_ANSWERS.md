@@ -1,5 +1,9 @@
 # Day 12 Lab - Mission Answers
 
+> **Student Name:** Nguyễn Quang Khánh An  
+> **Student ID:** 2A202600698  
+> **Date:** 12/06/2026
+
 ## Part 1: Localhost vs Production
 
 ### Exercise 1.1: Anti-patterns found in basic app.py
@@ -70,7 +74,7 @@
 1. **Stage 1 (Builder) làm gì?**
    - Làm nhiệm vụ **chuẩn bị và cài đặt**: Tải base image `python:3.11-slim` và cài đặt các công cụ biên dịch (như `gcc`, `libpq-dev`) cần thiết để build và cài đặt các thư viện Python (dependencies) vào thư mục `/root/.local` bằng cờ `--user`.
 2. **Stage 2 (Runtime) làm gì?**
-   - Làm nhiệm vụ **chạy ứng dụng (production environment)**: Khởi tạo một môi trường Python slim sạch sẽ mới, tạo non-root user (`appuser`) để bảo mật, sau đó chỉ sao chép các file thư viện Python đã cài đặt thành công từ Stage 1 sang (`COPY --from=builder /root/.local ...`) và mã nguồn của app để chạy uvicorn.
+   - Làm nhiệm vụ **chạy ứng dụng (production environment)**: Khởi tạo một môi trường Python slim sạch sẽ mới, tạo non-root user (`appuser` hoặc `agent`) để bảo mật, sau đó chỉ sao chép các file thư viện Python đã cài đặt thành công từ Stage 1 sang (`COPY --from=builder /root/.local ...`) và mã nguồn của app để chạy uvicorn.
 3. **Tại sao image nhỏ hơn?**
    - Vì toàn bộ các công cụ biên dịch nặng nề (như `gcc`, `apt-get` packages) và cache của pip chỉ tồn tại ở Stage 1 và hoàn toàn bị loại bỏ, không copy sang Stage 2.
    - Hơn nữa, Stage 2 sử dụng base image `python:3.11-slim` (chỉ chứa các thành phần tối thiểu để chạy Python) thay vì image `python:3.11` đầy đủ.
@@ -85,13 +89,73 @@
 
 ---
 
+## Part 3: Cloud Deployment
+
+### Exercise 3.1: Railway deployment
+- **Public URL**: https://day12-part6-production.up.railway.app
+- **Screenshots**:
+  - Deployment Dashboard: [dashboard.png](screenshots/dashboard.png)
+  - Service Running: [running.png](screenshots/running.png)
+  - Test Results: [test.png](screenshots/test.png)
+
+---
+
 ## Part 4: API Security
 
 ### Exercise 4.1: API Key authentication
 1. **API key được check ở đâu?**
    - API Key được check bởi hàm dependency **`verify_api_key`** (FastAPI Dependency Injection). Hàm này trích xuất API Key từ header `X-API-Key` của request và đối chiếu với biến môi trường `AGENT_API_KEY` của ứng dụng.
 2. **Điều gì xảy ra nếu sai key?**
-   - Nếu thiếu API Key (không truyền header `X-API-Key`): Trả về lỗi **`401 Unauthorized`** kèm thông báo `"Missing API key. Include header: X-API-Key: <your-key>"`.
-   - Nếu truyền sai API Key: Trả về lỗi **`403 Forbidden`** kèm thông báo `"Invalid API key."`.
+   - Nếu thiếu API Key (không truyền header `X-API-Key`): Trả về lỗi **`401 Unauthorized`** kèm thông báo `"Invalid or missing API key. Include header: X-API-Key: <key>"`.
+   - Nếu truyền sai API Key: Trả về lỗi **`401 Unauthorized`** kèm thông báo `"Invalid or missing API key. Include header: X-API-Key: <key>"`.
 3. **Làm sao rotate key?**
    - Bạn chỉ cần thay đổi giá trị của biến môi trường `AGENT_API_KEY` (trong file `.env` hoặc trên Cloud Dashboard như Railway/Render) và khởi động lại ứng dụng. Do ứng dụng đọc key động từ môi trường qua `os.getenv` thay vì viết cứng (hardcode) trong code, nên không cần sửa đổi hay build lại mã nguồn.
+
+### Exercise 4.2: JWT authentication (Advanced)
+1. **JWT Flow trong môi trường Production**:
+   - **Bước 1 (Đăng nhập)**: Client gửi một request `POST /token` chứa thông tin đăng nhập (như `username` và `password`) dạng JSON tới máy chủ.
+   - **Bước 2 (Xác thực & Tạo Token)**: Server kiểm tra thông tin đăng nhập từ cơ sở dữ liệu giả lập. Nếu chính xác, server tạo một mã Access Token JWT có chứa payload (thông tin user, vai trò `role: admin/user`, thời gian hết hạn `exp`, hạn mức chi tiêu `daily_limit`). Token này được ký số bằng thuật toán HMAC-SHA256 kết hợp khóa bí mật `JWT_SECRET` của server.
+   - **Bước 3 (Gửi & Lưu trữ Token)**: Server trả về JWT token cho Client dưới dạng JSON. Client lưu trữ token này trong bộ nhớ local hoặc cookie để sử dụng sau.
+   - **Bước 4 (Truy cập được bảo mật)**: Ở các request tiếp theo tới các endpoint cần bảo mật (như `/ask`), Client gửi kèm token này trong header `Authorization: Bearer <JWT_TOKEN>`.
+   - **Bước 5 (Giải mã & Phê duyệt)**: FastAPI sử dụng dependency injection (`verify_token`) để chặn request, kiểm tra chữ ký và tính hợp lệ của token. Nếu token hợp lệ và chưa hết hạn, request được chuyển tiếp đến controller xử lý; nếu không hợp lệ, hệ thống trả về mã lỗi `401 Unauthorized`.
+
+### Exercise 4.3: Rate limiting
+1. **Thuật toán sử dụng**:
+   - Trong ứng dụng ở Part 4 (Production), thuật toán **Sliding Window Counter** được sử dụng ở local (bộ nhớ in-memory) bằng cách duy trì một `deque` các mốc thời gian (timestamps) của các request của từng user. Các request có timestamp ngoài cửa sổ giám sát (60 giây trước) sẽ bị loại bỏ (`popleft()`).
+   - Trong ứng dụng lab hoàn chỉnh (`06-lab-complete`), hệ thống sử dụng **Redis-based Fixed Window Counter** làm cơ chế chính. Mỗi phút, một key mới có dạng `rate_limit:{user_id}:{current_minute}` sẽ được tăng giá trị (`incr`) trong Redis và cấu hình thời gian sống `TTL = 60s`. Nếu Redis lỗi, hệ thống tự động fallback sang cơ chế sliding window in-memory bằng `deque`.
+2. **Hạn mức (Limit)**:
+   - Được cấu hình động thông qua biến môi trường `RATE_LIMIT_PER_MINUTE` (mặc định là **20 requests/minute**).
+3. **Bypass limit cho admin**:
+   - Hệ thống khởi tạo hai instance của RateLimiter: `rate_limiter_user` (10 req/min) và `rate_limiter_admin` (100 req/min). Khi giải mã token thành công và phát hiện payload chứa vai trò `"admin"`, hệ thống sẽ áp dụng bộ lọc `rate_limiter_admin` thay vì `rate_limiter_user` để nâng hạn mức cho tài khoản admin lên gấp 10 lần.
+
+### Exercise 4.4: Cost guard implementation
+1. **Giải pháp triển khai (Approach)**:
+   - **Tính toán chi phí (Token Pricing)**: Mỗi request được ước tính chi phí trước khi gọi LLM: số lượng token input được ước lượng bằng cách đếm số từ của câu hỏi nhân với 2, nhân với đơn giá đầu vào của model GPT-4o-mini ($0.00015 / 1K tokens). Sau khi có câu trả lời, chi phí đầu ra tiếp tục được cộng thêm dựa trên số từ của câu trả lời ($0.0006 / 1K tokens).
+   - **Lưu vết và cộng dồn bằng Redis**: Tổng chi phí tích lũy trong ngày của mỗi user được lưu trữ trong Redis bằng lệnh `incrbyfloat` với key dạng `cost:{user_id}:{today}` (TTL là 2 ngày để đảm bảo cache dọn dẹp tự động). Trước mỗi request, hệ thống gọi `check_budget` để kiểm tra chi phí tích lũy hiện tại có vượt quá giới hạn hàng ngày (`daily_budget_usd`, mặc định là $5.0) hay không. Nếu vượt quá, trả về mã lỗi `402 Payment Required` hoặc `503 Service Unavailable`.
+   - **In-memory Fallback**: Trường hợp không có kết nối Redis, hệ thống lưu trữ tổng chi phí trong ngày vào biến RAM cục bộ (`_daily_cost` và `_cost_reset_day`), tự động reset khi chuyển sang ngày mới.
+
+---
+
+## Part 5: Scaling & Reliability
+
+### Exercise 5.1: Health checks implementation
+- **GET /health (Liveness Probe)**: Trả về trạng thái hoạt động hiện tại của container (`"status": "ok"`), phiên bản ứng dụng, môi trường (development/production), thời gian hoạt động liên tục (uptime) và số lượng request đã xử lý. Nếu container bị treo hoặc crash, endpoint không phản hồi và platform (như Railway) sẽ tự động khởi động lại container mới.
+- **GET /ready (Readiness Probe)**: Đảm bảo container đã sẵn sàng nhận traffic. Endpoint kiểm tra biến nội bộ `_is_ready` (được set thành `True` sau khi hoàn thành startup trong lifespan) và kiểm tra kết nối ping tới Redis. Nếu kết nối database/Redis lỗi, trả về mã HTTP `503 Service Unavailable` để load balancer tạm thời ngừng điều hướng request tới container này.
+
+### Exercise 5.2: Graceful shutdown
+- Ứng dụng đăng ký signal handler để bắt tín hiệu kết thúc chương trình (`SIGTERM`) từ container orchestrator khi thực hiện deploy bản mới hoặc scale-down.
+- Khi nhận tín hiệu, server FastAPI ngừng nhận thêm các kết nối/request mới, nhưng Uvicorn được cấu hình `timeout_graceful_shutdown=30` sẽ đợi tối đa 30 giây để hoàn thành nốt các request hiện tại đang xử lý dở dang, sau đó đóng các kết nối tới Redis/database một cách an toàn trước khi thoát tiến trình, ngăn chặn việc mất mát dữ liệu hoặc làm lỗi request của người dùng.
+
+### Exercise 5.3: Stateless design
+- **Đặc điểm thiết kế**: Toàn bộ dữ liệu hội thoại (conversation history), bộ đếm rate limit và thông tin ngân sách cost guard được lưu trữ tập trung tại Redis thay vì ghi nhận vào RAM cục bộ của container.
+- **Tại sao quan trọng**: Khi ứng dụng được scale horizontal (chạy nhiều bản sao song song đằng sau Load Balancer), client có thể được điều hướng tới bất kỳ container ngẫu nhiên nào. Nhờ thiết kế stateless, bất kỳ instance nào cũng có thể xử lý request vì chúng cùng đọc và ghi chung trạng thái lên Redis tập trung.
+
+### Exercise 5.4: Load balancing
+- Triển khai **Nginx** làm Load Balancer đặt phía trước cụm dịch vụ `agent`. Client chỉ giao tiếp qua cổng `80` của Nginx. Nginx sẽ phân tán các request đến các container `agent` ở cổng `8000` theo thuật toán quay vòng (Round Robin). Khi tăng số lượng instance (`--scale agent=3`), tải hệ thống được chia đều giúp giảm tải cho từng máy chủ riêng lẻ.
+
+### Exercise 5.5: Test stateless design
+- Thực hiện kịch bản kiểm thử:
+  1. Gửi request đầu tiên đến endpoint `/ask` (thông qua load balancer Nginx) để lưu thông tin vào lịch sử trò chuyện.
+  2. Dùng lệnh `docker compose kill` để tắt ngẫu nhiên một instance của `agent`.
+  3. Gửi tiếp request thứ hai với nội dung hỏi về thông tin đã cung cấp ở request đầu tiên.
+  4. **Kết quả**: Hệ thống vẫn phản hồi đúng ngữ cảnh của cuộc trò chuyện do instance còn lại nhận request đã tải thành công lịch sử từ Redis tập trung, chứng minh thiết kế stateless hoạt động hoàn toàn chính xác.
