@@ -144,9 +144,18 @@ cd ../../02-docker/develop
 **Nhiệm vụ:** Đọc `Dockerfile` và trả lời:
 
 1. Base image là gì?
+   - Base image là `python:3.11` (Bản phân phối Python đầy đủ, dung lượng file nén lớn khoảng ~1 GB).
+
 2. Working directory là gì?
+   - Working directory trong container là `/app` (tất cả các lệnh chạy và copy sau đó sẽ mặc định thao tác tại đây).
+
 3. Tại sao COPY requirements.txt trước?
+   - Để tận dụng cơ chế lưu bộ nhớ đệm theo lớp của Docker (**Docker Layer Cache**). 
+   - Vì danh sách các thư viện phụ thuộc (`requirements.txt`) rất ít khi thay đổi so với mã nguồn (`app.py`), nên việc copy và chạy `pip install` trước sẽ giúp Docker cache lại lớp này. Trong các lần build tiếp theo, Docker không cần cài đặt lại thư viện mà chỉ build từ lớp copy mã nguồn, giúp giảm thời gian build từ vài phút xuống còn vài giây.
+
 4. CMD vs ENTRYPOINT khác nhau thế nào?
+   - **ENTRYPOINT**: Định nghĩa lệnh cốt lõi không đổi khi container chạy (ví dụ: `python`). Nó rất khó bị ghi đè khi chạy container bằng lệnh `docker run` (phải dùng cờ `--entrypoint`). Mọi đối số bổ sung truyền vào từ command line sẽ được gắn tiếp vào sau lệnh này.
+   - **CMD**: Định nghĩa lệnh hoặc tham số mặc định và có thể bị ghi đè hoàn toàn một cách dễ dàng khi người dùng truyền một lệnh khác ở cuối lệnh `docker run`. Khi dùng chung với `ENTRYPOINT`, `CMD` đóng vai trò là tham số mặc định truyền vào lệnh của `ENTRYPOINT`.
 
 ###  Exercise 2.2: Build và run
 
@@ -175,9 +184,13 @@ cd ../production
 ```
 
 **Nhiệm vụ:** Đọc `Dockerfile` và tìm:
-- Stage 1 làm gì?
-- Stage 2 làm gì?
+- Stage 1 (Builder) làm gì?
+  - Làm nhiệm vụ **chuẩn bị và cài đặt**: Tải base image `python:3.11-slim` và cài đặt các công cụ biên dịch (như `gcc`, `libpq-dev`) cần thiết để build và cài đặt các thư viện Python (dependencies) vào thư mục `/root/.local` bằng cờ `--user`.
+- Stage 2 (Runtime) làm gì?
+  - Làm nhiệm vụ **chạy ứng dụng (production environment)**: Khởi tạo một môi trường Python slim sạch sẽ mới, tạo non-root user (`appuser`) để bảo mật, sau đó chỉ sao chép các file thư viện Python đã cài đặt thành công từ Stage 1 sang (`COPY --from=builder /root/.local ...`) và mã nguồn của app để chạy uvicorn.
 - Tại sao image nhỏ hơn?
+  - Vì toàn bộ các công cụ biên dịch nặng nề (như `gcc`, `apt-get` packages) và cache của pip chỉ tồn tại ở Stage 1 và hoàn toàn bị loại bỏ, không copy sang Stage 2.
+  - Hơn nữa, Stage 2 sử dụng base image `python:3.11-slim` (chỉ chứa các thành phần tối thiểu để chạy Python) thay vì image `python:3.11` đầy đủ, giúp giảm kích thước image từ ~1.6 GB (bản Develop) xuống chỉ còn khoảng ~200-300 MB (bản Production).
 
 Build và so sánh:
 ```bash
@@ -189,11 +202,34 @@ docker images | grep my-agent
 
 **Nhiệm vụ:** Đọc `docker-compose.yml` và vẽ architecture diagram.
 
+#### Kiến trúc hệ thống (Architecture Diagram):
+```mermaid
+graph TD
+    Client[Client/Browser] -- "HTTP (Port 80)" --> Nginx[Nginx Load Balancer]
+    subgraph Docker Internal Network
+        Nginx -- "Proxy requests (Port 8000)" --> Agent1[Agent Instance 1]
+        Nginx -- "Proxy requests (Port 8000)" --> Agent2[Agent Instance 2]
+        Agent1 -- "Cache & History (Port 6379)" --> Redis[(Redis Cache)]
+        Agent2 -- "Cache & History (Port 6379)" --> Redis
+        Agent1 -- "Vector Search (Port 6333)" --> Qdrant[(Qdrant Vector DB)]
+        Agent2 -- "Vector Search (Port 6333)" --> Qdrant
+    end
+```
+
 ```bash
 docker compose up
 ```
 
-Services nào được start? Chúng communicate thế nào?
+Services nào được start?
+  1. **nginx**: Reverse proxy và load balancer, đóng vai trò là cổng ngõ duy nhất (Gateway) expose ra ngoài máy host qua cổng `80`.
+  2. **agent**: Ứng dụng FastAPI AI Agent xử lý logic chính (trong thực tế có thể chạy nhiều instance bằng cờ `--scale agent=2` để load balance).
+  3. **redis**: Cơ sở dữ liệu in-memory dùng để quản lý session cache và lịch sử trò chuyện (conversation history).
+  4. **qdrant**: Vector database để lưu trữ dữ liệu tri thức hỗ trợ RAG (Retrieval-Augmented Generation).
+
+Chúng communicate thế nào?
+  - Tất cả dịch vụ được kết nối chung vào một mạng nội bộ biệt lập của Docker tên là **`internal`** (bridge network). Các container giao tiếp trực tiếp với nhau thông qua tên service làm Hostname (ví dụ: `redis:6379`, `qdrant:6333`).
+  - **Nginx** là dịch vụ duy nhất mở cổng `80` ra ngoài để nhận request từ Client, sau đó chuyển tiếp (reverse proxy) và chia tải vào các container `agent` ở cổng `8000`.
+  - Khi `agent` nhận request, nó sẽ truy vấn lịch sử trò chuyện từ `redis` và truy vấn dữ liệu ngữ cảnh từ `qdrant` trước khi gọi mô hình để trả lời.
 
 Test:
 ```bash
