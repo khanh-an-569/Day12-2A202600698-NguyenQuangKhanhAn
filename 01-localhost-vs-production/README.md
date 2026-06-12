@@ -67,5 +67,19 @@ python app.py
 ## Câu hỏi thảo luận
 
 1. Điều gì xảy ra nếu bạn push code với API key hardcode lên GitHub public?
+- **Bị quét và mất Key ngay lập tức**: Các tin tặc sử dụng bot quét tự động (automated key scrapers) liên tục rà soát GitHub 24/7. Nếu phát hiện key (như `sk-...` của OpenAI hay AWS credentials), bot sẽ chiếm quyền sử dụng trong vòng vài giây.
+- **Hậu quả tài chính**: Kẻ xấu dùng key để spam requests, chạy các mô hình lớn hoặc đào tiền ảo, khiến bạn phải chịu hóa đơn khổng lồ từ nhà cung cấp dịch vụ.
+- **Bị khóa tài khoản**: Các nhà cung cấp dịch vụ lớn (như OpenAI, GitHub) có cơ chế tự động phát hiện rò rỉ và sẽ tự động vô hiệu hóa (revoke) key đó để bảo vệ bạn, nhưng tài khoản của bạn vẫn có nguy cơ bị khóa tạm thời.
+- **Lưu vết vĩnh viễn trong Git History**: Cho dù bạn sửa code và push commit mới lên, key vẫn tồn tại trong lịch sử commit cũ. Bạn phải dùng các công cụ đặc biệt như `git-filter-repo` hoặc BFG Repo-Cleaner để dọn dẹp lịch sử Git triệt để.
+
 2. Tại sao stateless quan trọng khi scale?
+- **Khả năng cân bằng tải (Load Balancing)**: Khi ứng dụng scale horizontal (tăng số lượng instances chạy song song), bộ cân bằng tải (Load Balancer) sẽ phân phối requests của người dùng tới bất kỳ instance ngẫu nhiên nào. Nếu ứng dụng là stateless (không lưu trạng thái phiên làm việc trong RAM/ổ đĩa cục bộ), bất kỳ instance nào cũng có thể xử lý request đó mà không bị mất lịch sử hay lỗi phiên.
+- **Auto-scaling dễ dàng**: Bạn có thể thêm hoặc bớt instances bất kỳ lúc nào dựa theo lưu lượng tải thực tế mà không cần lo lắng về việc chuyển dời hoặc đồng bộ hóa bộ nhớ giữa các máy chủ.
+- **Khả năng chống chịu lỗi (Fault Tolerance)**: Nếu một instance bị crash đột ngột, instance khác sẽ ngay lập tức thay thế và tiếp tục xử lý công việc từ database trung tâm (như Redis) mà không làm gián đoạn trải nghiệm của người dùng.
+
 3. 12-factor nói "dev/prod parity" — nghĩa là gì trong thực tế?
+- **Khái niệm**: Giữ cho môi trường phát triển (Development) và môi trường vận hành (Production) giống nhau tối đa có thể về: công cụ, mã nguồn cấu hình, thư viện và quy trình vận hành.
+- **Thực tế**:
+  - **Đồng bộ hóa Backing Services**: Không dùng SQLite ở local nhưng deploy PostgreSQL ở production. Thay vào đó, phải dùng PostgreSQL ở cả hai nơi (chạy local qua Docker).
+  - **Sử dụng Docker**: Đóng gói ứng dụng vào Docker container để chạy ở local hay cloud đều sử dụng chung một phiên bản Python, hệ điều hành nền và cấu hình thư viện y hệt nhau.
+  - **Rút ngắn khoảng cách triển khai (Continuous Deployment)**: Code viết xong ở local được tự động kiểm thử và deploy lên production càng sớm càng tốt để phát hiện lỗi sớm thay vì tích tụ hàng tháng mới deploy.
