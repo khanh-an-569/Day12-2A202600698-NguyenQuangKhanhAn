@@ -375,8 +375,14 @@ cd ../../04-api-gateway/develop
 
 **Nhiệm vụ:** Đọc `app.py` và tìm:
 - API key được check ở đâu?
+  - API Key được trích xuất từ header `X-API-Key` và được kiểm tra bởi hàm dependency **`verify_api_key(api_key: str)`** (dòng 39-54). Hàm này được tích hợp vào endpoint `/ask` thông qua `_key: str = Depends(verify_api_key)` (dòng 70).
+
 - Điều gì xảy ra nếu sai key?
+  - Nếu thiếu API Key (không truyền header `X-API-Key`): Trả về lỗi **`401 Unauthorized`** kèm thông báo `"Missing API key. Include header: X-API-Key: <your-key>"`.
+  - Nếu truyền sai API Key (không khớp với biến môi trường `AGENT_API_KEY` cấu hình trên server): Trả về lỗi **`403 Forbidden`** kèm thông báo `"Invalid API key."`.
+  
 - Làm sao rotate key?
+  - Vì API Key được đọc động từ biến môi trường thông qua `os.getenv("AGENT_API_KEY")` (dòng 35) thay vì viết cứng trong code (tuân thủ 12-factor). Do đó để rotate key, bạn chỉ cần thay đổi giá trị của biến môi trường `AGENT_API_KEY` (trong file `.env` hoặc trên Dashboard của các dịch vụ Cloud như Railway/Render) và khởi động lại ứng dụng.
 
 Test:
 ```bash

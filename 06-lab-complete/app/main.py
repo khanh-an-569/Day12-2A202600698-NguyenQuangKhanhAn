@@ -22,6 +22,7 @@ import json
 from datetime import datetime, timezone
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+import redis
 
 from fastapi import FastAPI, HTTPException, Security, Depends, Request, Response
 from fastapi.security.api_key import APIKeyHeader
@@ -49,11 +50,44 @@ _request_count = 0
 _error_count = 0
 
 # ─────────────────────────────────────────────────────────
-# Simple In-memory Rate Limiter
+# Redis Connection & Fallback Setup
+# ─────────────────────────────────────────────────────────
+redis_client = None
+if settings.redis_url:
+    try:
+        redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+        redis_client.ping()
+        logging.getLogger(__name__).info("Connected to Redis successfully")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to connect to Redis: {e}. Falling back to in-memory mode.")
+        redis_client = None
+
+# ─────────────────────────────────────────────────────────
+# Rate Limiter (Redis with In-memory Fallback)
 # ─────────────────────────────────────────────────────────
 _rate_windows: dict[str, deque] = defaultdict(deque)
 
 def check_rate_limit(key: str):
+    if redis_client:
+        try:
+            current_minute = time.strftime("%Y-%m-%d-%H-%M")
+            redis_key = f"rate_limit:{key}:{current_minute}"
+            count = redis_client.incr(redis_key)
+            if count == 1:
+                redis_client.expire(redis_key, 60)
+            if count > settings.rate_limit_per_minute:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Rate limit exceeded: {settings.rate_limit_per_minute} req/min",
+                    headers={"Retry-After": "60"},
+                )
+            return
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"Redis rate limiter error: {e}. Using in-memory fallback.")
+
+    # In-memory Fallback
     now = time.time()
     window = _rate_windows[key]
     while window and window[0] < now - 60:
@@ -67,20 +101,39 @@ def check_rate_limit(key: str):
     window.append(now)
 
 # ─────────────────────────────────────────────────────────
-# Simple Cost Guard
+# Cost Guard (Redis with In-memory Fallback)
 # ─────────────────────────────────────────────────────────
 _daily_cost = 0.0
 _cost_reset_day = time.strftime("%Y-%m-%d")
 
-def check_and_record_cost(input_tokens: int, output_tokens: int):
+def check_and_record_cost(user_id: str, input_tokens: int, output_tokens: int):
     global _daily_cost, _cost_reset_day
+    cost = (input_tokens / 1000) * 0.00015 + (output_tokens / 1000) * 0.0006
+
+    if redis_client:
+        try:
+            today = time.strftime("%Y-%m-%d")
+            redis_key = f"cost:{user_id}:{today}"
+            current_cost = float(redis_client.get(redis_key) or 0.0)
+            if current_cost >= settings.daily_budget_usd:
+                raise HTTPException(503, "Daily budget exhausted. Try tomorrow.")
+            
+            if cost > 0:
+                redis_client.incrbyfloat(redis_key, cost)
+                redis_client.expire(redis_key, 86400 * 2) # 2 days cache TTL
+            return
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"Redis cost guard error: {e}. Using in-memory fallback.")
+
+    # In-memory Fallback
     today = time.strftime("%Y-%m-%d")
     if today != _cost_reset_day:
         _daily_cost = 0.0
         _cost_reset_day = today
     if _daily_cost >= settings.daily_budget_usd:
         raise HTTPException(503, "Daily budget exhausted. Try tomorrow.")
-    cost = (input_tokens / 1000) * 0.00015 + (output_tokens / 1000) * 0.0006
     _daily_cost += cost
 
 # ─────────────────────────────────────────────────────────
@@ -202,23 +255,46 @@ async def ask_agent(
 
     **Authentication:** Include header `X-API-Key: <your-key>`
     """
+    user_id = _key[:8]  # use first 8 chars as key bucket
+    
     # Rate limit per API key
-    check_rate_limit(_key[:8])  # use first 8 chars as key bucket
+    check_rate_limit(user_id)
 
-    # Budget check
+    # Budget check (input cost)
     input_tokens = len(body.question.split()) * 2
-    check_and_record_cost(input_tokens, 0)
+    check_and_record_cost(user_id, input_tokens, 0)
+
+    # 1. Fetch conversation history from Redis
+    history = []
+    history_key = f"history:{user_id}"
+    if redis_client:
+        try:
+            history = redis_client.lrange(history_key, 0, -1)
+        except Exception as e:
+            logger.warning(f"Failed to fetch conversation history from Redis: {e}")
 
     logger.info(json.dumps({
         "event": "agent_call",
         "q_len": len(body.question),
+        "history_len": len(history),
         "client": str(request.client.host) if request.client else "unknown",
     }))
 
     answer = llm_ask(body.question)
 
+    # 2. Append conversation history to Redis
+    if redis_client:
+        try:
+            redis_client.rpush(history_key, f"User: {body.question}")
+            redis_client.rpush(history_key, f"AI: {answer}")
+            redis_client.ltrim(history_key, -20, -1)  # Keep last 10 turns
+            redis_client.expire(history_key, 3600 * 24)  # 24h expire
+        except Exception as e:
+            logger.warning(f"Failed to save conversation history to Redis: {e}")
+
+    # Budget check (output cost)
     output_tokens = len(answer.split()) * 2
-    check_and_record_cost(0, output_tokens)
+    check_and_record_cost(user_id, 0, output_tokens)
 
     return AskResponse(
         question=body.question,
@@ -249,6 +325,11 @@ def ready():
     """Readiness probe. Load balancer stops routing here if not ready."""
     if not _is_ready:
         raise HTTPException(503, "Not ready")
+    if redis_client:
+        try:
+            redis_client.ping()
+        except Exception as e:
+            raise HTTPException(503, f"Redis connection failed: {e}")
     return {"ready": True}
 
 

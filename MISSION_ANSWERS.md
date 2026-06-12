@@ -82,3 +82,16 @@
   - **Nginx** là cổng duy nhất mở ra ngoài qua cổng `80` (HTTP) để nhận request từ Client, sau đó đóng vai trò làm Load Balancer điều hướng requests sang các instance `agent` ở cổng `8000`.
   - **Agent** nhận request, thực hiện kết nối tới `redis` để đọc/ghi session và lịch sử hội thoại, và kết nối tới `qdrant` để truy vấn dữ liệu vector tri thức hỗ trợ RAG.
   - Các container giao tiếp nội bộ thông qua tên service làm hostname (ví dụ: `redis:6379`, `qdrant:6333`).
+
+---
+
+## Part 4: API Security
+
+### Exercise 4.1: API Key authentication
+1. **API key được check ở đâu?**
+   - API Key được check bởi hàm dependency **`verify_api_key`** (FastAPI Dependency Injection). Hàm này trích xuất API Key từ header `X-API-Key` của request và đối chiếu với biến môi trường `AGENT_API_KEY` của ứng dụng.
+2. **Điều gì xảy ra nếu sai key?**
+   - Nếu thiếu API Key (không truyền header `X-API-Key`): Trả về lỗi **`401 Unauthorized`** kèm thông báo `"Missing API key. Include header: X-API-Key: <your-key>"`.
+   - Nếu truyền sai API Key: Trả về lỗi **`403 Forbidden`** kèm thông báo `"Invalid API key."`.
+3. **Làm sao rotate key?**
+   - Bạn chỉ cần thay đổi giá trị của biến môi trường `AGENT_API_KEY` (trong file `.env` hoặc trên Cloud Dashboard như Railway/Render) và khởi động lại ứng dụng. Do ứng dụng đọc key động từ môi trường qua `os.getenv` thay vì viết cứng (hardcode) trong code, nên không cần sửa đổi hay build lại mã nguồn.
